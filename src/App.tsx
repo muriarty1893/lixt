@@ -97,7 +97,7 @@ export default function App() {
   const [density, setDensity] = useState<Density>(loadLS(LS_KEYS.density, "comfortable"));
   const [sortMode, setSortMode] = useState<SortMode>(loadLS(LS_KEYS.sort, "manual"));
   const [selected, setSelected] = useState<Set<number>>(new Set());
-  const [focusedIdx, setFocusedIdx] = useState(0);
+  const [focusedIdx, setFocusedIdx] = useState(-1);
   const [draggingVid, setDraggingVid] = useState<number | null>(null);
   const [dragOverVid, setDragOverVid] = useState<number | null>(null);
   const [draggingPLId, setDraggingPLId] = useState<number | null>(null);
@@ -129,7 +129,7 @@ export default function App() {
 
   useEffect(() => { loadPlaylists(); loadTrash(); }, []);
   useEffect(() => { refresh(); }, [refresh]);
-  useEffect(() => { setSelected(new Set()); setFocusedIdx(0); }, [view, search]);
+  useEffect(() => { setSelected(new Set()); setFocusedIdx(-1); }, [view, search]);
   useEffect(() => { try { localStorage.setItem(LS_KEYS.viewMode, viewMode); } catch {} }, [viewMode]);
   useEffect(() => { try { localStorage.setItem(LS_KEYS.density, density); } catch {} }, [density]);
   useEffect(() => { try { localStorage.setItem(LS_KEYS.sort, sortMode); } catch {} }, [sortMode]);
@@ -443,8 +443,8 @@ export default function App() {
         e.preventDefault();
         setVideos((cur) => {
           if (cur.length === 0) return cur;
-          let idx = Math.min(focusedIdx, cur.length - 1);
-          idx = e.key === "ArrowDown" ? Math.min(cur.length - 1, idx + 1) : Math.max(0, idx - 1);
+          let idx = focusedIdx < 0 ? 0 : Math.min(focusedIdx, cur.length - 1);
+          idx = e.key === "ArrowDown" ? Math.min(cur.length - 1, idx + (focusedIdx < 0 ? 0 : 1)) : Math.max(0, idx - 1);
           setFocusedIdx(idx);
           return cur;
         });
@@ -883,12 +883,12 @@ function GridView(props: GridProps) {
               onClick={(e) => { e.stopPropagation(); props.onToggleSelect(v.id, e.ctrlKey || e.metaKey || e.shiftKey); }}
               className={cardClass({ selected: selected.has(v.id), focused: idx === focusedIdx, dragging: draggingVid === v.id, dragOver: dragOverVid === v.id })}
             >
-              <button onClick={(e) => { e.stopPropagation(); props.onOpen(v); }} className="block w-full text-left">
+              <div onClick={(e) => { e.stopPropagation(); props.onOpen(v); }} className="block w-full cursor-pointer text-left">
                 <ThumbBox src={thumbCache[v.id]} className="aspect-video w-full rounded-md" />
-              </button>
-              <button onClick={(e) => { e.stopPropagation(); props.onOpen(v); }} className="block w-full text-left">
+              </div>
+              <div onClick={(e) => { e.stopPropagation(); props.onOpen(v); }} className="block w-full cursor-pointer text-left">
                 <div className="line-clamp-2 font-medium leading-snug hover:text-primary">{v.title}</div>
-              </button>
+              </div>
               <div className="text-xs text-muted-foreground">{v.channel} · {relativeTime(v.added_at)}</div>
               <CardFooter v={v} {...props} />
             </div>
@@ -925,13 +925,13 @@ function ListView(props: GridProps) {
                 dragOverVid === v.id && "border-t-2 border-primary",
               )}
             >
-              <button onClick={(e) => { e.stopPropagation(); props.onOpen(v); }} className="shrink-0">
+              <div onClick={(e) => { e.stopPropagation(); props.onOpen(v); }} className="shrink-0 cursor-pointer">
                 <ThumbBox src={thumbCache[v.id]} className={cn(thumbSize, "shrink-0")} />
-              </button>
+              </div>
               <div className="flex min-w-0 flex-1 flex-col">
-                <button onClick={(e) => { e.stopPropagation(); props.onOpen(v); }} className="block w-full text-left">
+                <div onClick={(e) => { e.stopPropagation(); props.onOpen(v); }} className="block w-full cursor-pointer text-left">
                   <div className="truncate text-sm font-medium hover:text-primary">{v.title}</div>
-                </button>
+                </div>
                 <div className="truncate text-xs text-muted-foreground">{v.channel} · {relativeTime(v.added_at)}</div>
               </div>
               <div className="flex shrink-0 items-center gap-1">
