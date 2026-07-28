@@ -1,7 +1,7 @@
 [package]
-name = "lixt"
+name = "lixt-link"
 version = "0.1.0"
-description = "A Tauri App"
+description = "lixt link — local-first YouTube video library"
 authors = ["you"]
 edition = "2021"
 

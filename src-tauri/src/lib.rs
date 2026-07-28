@@ -286,22 +286,20 @@ fn add_video(
     .map_err(|e| e.to_string())?;
     let id = conn.last_insert_rowid();
 
-    let max_pos: i64 = conn
-        .query_row("SELECT COALESCE(MAX(position), -1) FROM videos", [], |r| r.get(0))
-        .unwrap_or(-1);
-    conn.execute("UPDATE videos SET position = ?1 WHERE id = ?2", params![max_pos + 1, id]).ok();
+    // Insert at top: shift existing videos down by 1, then assign position 0 to the new one.
+    conn.execute("UPDATE videos SET position = position + 1", []).ok();
+    conn.execute("UPDATE videos SET position = 0 WHERE id = ?1", params![id]).ok();
 
     for pid in &playlist_ids {
-        let max_pl_pos: i64 = conn
-            .query_row(
-                "SELECT COALESCE(MAX(position), -1) FROM video_playlists WHERE playlist_id = ?1",
-                params![pid],
-                |r| r.get(0),
-            )
-            .unwrap_or(-1);
+        // Same for the playlist link: insert at top of that playlist.
         conn.execute(
-            "INSERT OR IGNORE INTO video_playlists (video_id, playlist_id, added_at, position) VALUES (?1, ?2, ?3, ?4)",
-            params![id, pid, now_ts(), max_pl_pos + 1],
+            "UPDATE video_playlists SET position = position + 1 WHERE playlist_id = ?1",
+            params![pid],
+        )
+        .ok();
+        conn.execute(
+            "INSERT OR IGNORE INTO video_playlists (video_id, playlist_id, added_at, position) VALUES (?1, ?2, ?3, 0)",
+            params![id, pid, now_ts()],
         )
         .ok();
     }
@@ -501,22 +499,35 @@ fn remove_video_from_playlist(video_id: i64, playlist_id: i64) -> Result<(), Str
 fn bulk_add_to_playlist(video_ids: Vec<i64>, playlist_id: i64) -> Result<(), String> {
     let conn_lock = DB.lock().unwrap();
     let conn = conn_lock.as_ref().expect("db");
-    let max_pos: i64 = conn
-        .query_row(
-            "SELECT COALESCE(MAX(position), -1) FROM video_playlists WHERE playlist_id = ?1",
-            params![playlist_id],
-            |r| r.get(0),
-        )
-        .unwrap_or(-1);
-    let mut pos = max_pos + 1;
-    for vid in &video_ids {
-        let inserted = conn.execute(
+    // Insert at top of the playlist: shift existing entries down by N (the number we'll add),
+    // then assign positions 0..N-1 to the newly-added ones (in the order the user picked them).
+    let to_add: Vec<i64> = video_ids
+        .iter()
+        .filter(|vid| {
+            conn.query_row(
+                "SELECT 1 FROM video_playlists WHERE video_id = ?1 AND playlist_id = ?2",
+                params![vid, playlist_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .is_err()
+        })
+        .copied()
+        .collect();
+    if to_add.is_empty() {
+        return Ok(());
+    }
+    let shift = to_add.len() as i64;
+    conn.execute(
+        "UPDATE video_playlists SET position = position + ?1 WHERE playlist_id = ?2",
+        params![shift, playlist_id],
+    )
+    .map_err(|e| e.to_string())?;
+    for (i, vid) in to_add.iter().enumerate() {
+        conn.execute(
             "INSERT OR IGNORE INTO video_playlists (video_id, playlist_id, added_at, position) VALUES (?1, ?2, ?3, ?4)",
-            params![vid, playlist_id, now_ts(), pos],
-        );
-        if inserted.unwrap_or(0) > 0 {
-            pos += 1;
-        }
+            params![vid, playlist_id, now_ts(), i as i64],
+        )
+        .ok();
     }
     Ok(())
 }
@@ -628,23 +639,19 @@ fn restore_from_trash(youtube_id: String, playlist_ids: Vec<i64>) -> Result<(), 
     let vid: i64 = conn
         .query_row("SELECT id FROM videos WHERE youtube_id = ?1", params![&youtube_id], |r| r.get(0))
         .map_err(|e| e.to_string())?;
-    let max_pos: i64 = conn.query_row("SELECT COALESCE(MAX(position), -1) FROM videos", [], |r| r.get(0)).unwrap_or(-1);
-    conn.execute("UPDATE videos SET position = ?1 WHERE id = ?2", params![max_pos + 1, vid]).ok();
-    let mut pl_max: i64 = -1;
+    // Insert restored video at top of All videos.
+    conn.execute("UPDATE videos SET position = position + 1", []).ok();
+    conn.execute("UPDATE videos SET position = 0 WHERE id = ?1", params![vid]).ok();
     for pid in &playlist_ids {
-        let m: i64 = conn
-            .query_row(
-                "SELECT COALESCE(MAX(position), -1) FROM video_playlists WHERE playlist_id = ?1",
-                params![pid],
-                |r| r.get(0),
-            )
-            .unwrap_or(-1);
-        if m > pl_max {
-            pl_max = m;
-        }
+        // And at top of each requested playlist.
         conn.execute(
-            "INSERT OR IGNORE INTO video_playlists (video_id, playlist_id, added_at, position) VALUES (?1, ?2, ?3, ?4)",
-            params![vid, pid, now_ts(), m + 1],
+            "UPDATE video_playlists SET position = position + 1 WHERE playlist_id = ?1",
+            params![pid],
+        )
+        .ok();
+        conn.execute(
+            "INSERT OR IGNORE INTO video_playlists (video_id, playlist_id, added_at, position) VALUES (?1, ?2, ?3, 0)",
+            params![vid, pid, now_ts()],
         )
         .ok();
     }

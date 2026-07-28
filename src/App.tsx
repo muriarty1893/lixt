@@ -490,7 +490,7 @@ export default function App() {
       <aside className="flex w-64 shrink-0 flex-col border-r bg-secondary/30">
         <div className="flex items-center gap-2 px-4 py-3">
           <Library className="size-5 text-primary" />
-          <span className="font-semibold tracking-tight">lixt</span>
+          <span className="font-semibold tracking-tight">lixt link</span>
           <div className="ml-auto flex gap-1">
             <Button variant="ghost" size="icon" className="size-7" title="Import backup" onClick={onImport}>
               <Upload className="size-3.5" />
@@ -962,6 +962,10 @@ function CardFooter({
       <Button variant="ghost" size="icon" className={btn} title="Watched"
         onClick={(e) => { e.stopPropagation(); onWatched(v); }}>
         {v.is_watched ? <Eye className="size-3.5 text-muted-foreground" /> : <EyeOff className="size-3.5" />}
+      </Button>
+      <Button variant="ghost" size="icon" className={cn(btn, "hover:text-destructive")} title="Move to trash"
+        onClick={(e) => { e.stopPropagation(); onTrash(v); }}>
+        <Trash2 className="size-3.5" />
       </Button>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
