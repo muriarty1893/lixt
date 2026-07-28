@@ -138,17 +138,21 @@ export default function App() {
     if (!v.thumbnail_path || thumbCache[v.id]) return;
     try {
       const blob = await api.readThumbnailBlob(v.thumbnail_path);
-      setThumbCache((p) => ({ ...p, [v.id]: `data:image/jpeg;base64,${blob}` }));
+      setThumbCache((p) => {
+        const next = { ...p, [v.id]: `data:image/jpeg;base64,${blob}` };
+        const keys = Object.keys(next);
+        if (keys.length > 120) {
+          const evict = keys.slice(0, keys.length - 120);
+          evict.forEach((k) => { delete next[Number(k)]; });
+        }
+        return next;
+      });
     } catch (err) {
       console.error("thumb load failed", v.id, err);
     }
   }, [thumbCache]);
 
-  useEffect(() => { videos.forEach(ensureThumb); setThumbCache((p) => {
-    const keep: Record<number, string> = {};
-    videos.forEach((v) => { if (p[v.id]) keep[v.id] = p[v.id]; });
-    return keep;
-  }); }, [videos, ensureThumb]);
+  useEffect(() => { videos.forEach(ensureThumb); }, [videos, ensureThumb]);
 
   // ───── actions ────────────────────────────────────────────────────────────────
 
