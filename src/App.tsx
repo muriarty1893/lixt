@@ -881,6 +881,7 @@ function GridView(props: GridProps) {
               onDrop={(e) => props.onVideoDrop(e, v)}
               onDragEnd={props.onVideoDragEnd}
               onClick={(e) => { e.stopPropagation(); props.onToggleSelect(v.id, e.ctrlKey || e.metaKey || e.shiftKey); }}
+              onAuxClick={(e) => { if (e.button === 1) { e.preventDefault(); e.stopPropagation(); props.onTrash(v); } }}
               className={cardClass({ selected: selected.has(v.id), focused: idx === focusedIdx, dragging: draggingVid === v.id, dragOver: dragOverVid === v.id })}
             >
               <div onClick={(e) => { e.stopPropagation(); props.onOpen(v); }} className="block w-full cursor-pointer text-left">
@@ -916,6 +917,7 @@ function ListView(props: GridProps) {
               onDrop={(e) => props.onVideoDrop(e, v)}
               onDragEnd={props.onVideoDragEnd}
               onClick={(e) => { e.stopPropagation(); props.onToggleSelect(v.id, e.ctrlKey || e.metaKey || e.shiftKey); }}
+              onAuxClick={(e) => { if (e.button === 1) { e.preventDefault(); e.stopPropagation(); props.onTrash(v); } }}
               className={cn(
                 "flex items-center gap-3 border-b px-3 transition-colors hover:bg-accent/30",
                 rowPad,
