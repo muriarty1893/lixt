@@ -19,6 +19,8 @@ pub struct Video {
     pub channel: String,
     pub thumbnail_path: Option<String>,
     pub added_at: i64,
+    pub is_favorite: bool,
+    pub is_watched: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -38,10 +40,27 @@ pub struct TrashEntry {
     pub deleted_at: i64,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct VideoWithPlaylists {
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ExistingVideo {
     pub video: Video,
-    pub playlists: Vec<i64>,
+    pub playlist_ids: Vec<i64>,
+    pub playlist_names: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct BackupBundle {
+    pub version: i64,
+    pub videos: Vec<Video>,
+    pub playlists: Vec<Playlist>,
+    pub video_playlists: Vec<(i64, i64)>,
+    pub trash: Vec<TrashEntry>,
+    pub thumbnails: Vec<ThumbnailBlob>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ThumbnailBlob {
+    pub youtube_id: String,
+    pub base64: String,
 }
 
 // ───── db path ─────────────────────────────────────────────────────────────────
@@ -60,6 +79,22 @@ fn thumb_dir(app: &tauri::AppHandle) -> PathBuf {
     let dir = data_dir(app).join("thumbnails");
     std::fs::create_dir_all(&dir).ok();
     dir
+}
+
+fn add_column_if_missing(conn: &Connection, table: &str, col: &str, decl: &str) {
+    let sql = format!("PRAGMA table_info({})", table);
+    let mut stmt = match conn.prepare(&sql) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let cols: Vec<String> = stmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .ok()
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default();
+    if !cols.iter().any(|c| c == col) {
+        let _ = conn.execute(&format!("ALTER TABLE {} ADD COLUMN {} {}", table, col, decl), []);
+    }
 }
 
 fn init_db(app: &tauri::AppHandle) -> Connection {
@@ -98,6 +133,11 @@ fn init_db(app: &tauri::AppHandle) -> Connection {
         );",
     )
     .expect("init schema");
+    add_column_if_missing(&conn, "videos", "position", "INTEGER NOT NULL DEFAULT 0");
+    add_column_if_missing(&conn, "videos", "is_favorite", "INTEGER NOT NULL DEFAULT 0");
+    add_column_if_missing(&conn, "videos", "is_watched", "INTEGER NOT NULL DEFAULT 0");
+    add_column_if_missing(&conn, "playlists", "position", "INTEGER NOT NULL DEFAULT 0");
+    add_column_if_missing(&conn, "video_playlists", "position", "INTEGER NOT NULL DEFAULT 0");
     conn
 }
 
@@ -105,7 +145,6 @@ fn init_db(app: &tauri::AppHandle) -> Connection {
 
 fn parse_youtube_id(input: &str) -> Option<(String, String)> {
     let trimmed = input.trim();
-    // bare id
     if trimmed.len() == 11 && !trimmed.contains('/') && !trimmed.contains('.') {
         return Some((trimmed.to_string(), format!("https://www.youtube.com/watch?v={}", trimmed)));
     }
@@ -142,7 +181,7 @@ fn parse_youtube_id(input: &str) -> Option<(String, String)> {
     None
 }
 
-// ───── oembed fetch ────────────────────────────────────────────────────────────
+// ───── oembed + thumbnail ──────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 struct OEmbed {
@@ -151,7 +190,6 @@ struct OEmbed {
 }
 
 async fn fetch_thumbnail(client: &reqwest::Client, youtube_id: &str, dest: PathBuf) -> Result<(), String> {
-    // try hqdefault then mqdefault
     for quality in &["hqdefault", "mqdefault", "default"] {
         let url = format!("https://img.youtube.com/vi/{}/{}.jpg", youtube_id, quality);
         let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
@@ -197,30 +235,31 @@ fn add_video(
     }
 
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
-    let oembed = runtime.block_on(async {
-        let client = reqwest::Client::builder()
-            .user_agent("lixt/0.1")
-            .timeout(std::time::Duration::from_secs(12))
-            .build();
-        let client = match client {
-            Ok(c) => c,
-            Err(e) => return Err(e.to_string()),
-        };
-        let resp = match client
-            .get("https://www.youtube.com/oembed")
-            .query(&[("url", canonical_url.as_str()), ("format", "json")])
-            .send()
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => return Err(e.to_string()),
-        };
-        if !resp.status().is_success() {
-            return Err(format!("oembed status {}", resp.status()));
-        }
-        resp.json::<OEmbed>().await.map_err(|e| e.to_string())
-    })
-    .ok();
+    let oembed = runtime
+        .block_on(async {
+            let client = reqwest::Client::builder()
+                .user_agent("lixt/0.1")
+                .timeout(std::time::Duration::from_secs(12))
+                .build();
+            let client = match client {
+                Ok(c) => c,
+                Err(e) => return Err(e.to_string()),
+            };
+            let resp = match client
+                .get("https://www.youtube.com/oembed")
+                .query(&[("url", canonical_url.as_str()), ("format", "json")])
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => return Err(e.to_string()),
+            };
+            if !resp.status().is_success() {
+                return Err(format!("oembed status {}", resp.status()));
+            }
+            resp.json::<OEmbed>().await.map_err(|e| e.to_string())
+        })
+        .ok();
 
     let title = oembed.as_ref().and_then(|o| o.title.clone()).unwrap_or_else(|| format!("YouTube {}", &youtube_id));
     let channel = oembed.as_ref().and_then(|o| o.author_name.clone()).unwrap_or_else(|| "Unknown".to_string());
@@ -247,10 +286,22 @@ fn add_video(
     .map_err(|e| e.to_string())?;
     let id = conn.last_insert_rowid();
 
+    let max_pos: i64 = conn
+        .query_row("SELECT COALESCE(MAX(position), -1) FROM videos", [], |r| r.get(0))
+        .unwrap_or(-1);
+    conn.execute("UPDATE videos SET position = ?1 WHERE id = ?2", params![max_pos + 1, id]).ok();
+
     for pid in &playlist_ids {
+        let max_pl_pos: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(position), -1) FROM video_playlists WHERE playlist_id = ?1",
+                params![pid],
+                |r| r.get(0),
+            )
+            .unwrap_or(-1);
         conn.execute(
-            "INSERT OR IGNORE INTO video_playlists (video_id, playlist_id, added_at) VALUES (?1, ?2, ?3)",
-            params![id, pid, now_ts()],
+            "INSERT OR IGNORE INTO video_playlists (video_id, playlist_id, added_at, position) VALUES (?1, ?2, ?3, ?4)",
+            params![id, pid, now_ts(), max_pl_pos + 1],
         )
         .ok();
     }
@@ -259,25 +310,85 @@ fn add_video(
 }
 
 #[tauri::command]
-fn list_videos(playlist_id: Option<i64>) -> Result<Vec<Video>, String> {
+fn check_existing(url: String) -> Result<Option<ExistingVideo>, String> {
+    let (youtube_id, _) = match parse_youtube_id(&url) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
     let conn_lock = DB.lock().unwrap();
     let conn = conn_lock.as_ref().expect("db");
-    let mut stmt = match playlist_id {
-        Some(_pid) => conn
-            .prepare(
-                "SELECT v.id, v.youtube_id, v.url, v.title, v.channel, v.thumbnail_path, v.added_at
+    let video = match get_video_by_youtube_id(conn, &youtube_id) {
+        Some(v) => v,
+        None => return Ok(None),
+    };
+    let mut stmt = conn
+        .prepare(
+            "SELECT p.id, p.name FROM playlists p
+             JOIN video_playlists vp ON vp.playlist_id = p.id
+             WHERE vp.video_id = ?1
+             ORDER BY p.name COLLATE NOCASE",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![video.id], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?;
+    let mut playlist_ids = Vec::new();
+    let mut playlist_names = Vec::new();
+    for row in rows {
+        let (id, name) = row.map_err(|e| e.to_string())?;
+        playlist_ids.push(id);
+        playlist_names.push(name);
+    }
+    Ok(Some(ExistingVideo { video, playlist_ids, playlist_names }))
+}
+
+#[tauri::command]
+fn list_videos(playlist_id: Option<i64>, sort: Option<String>) -> Result<Vec<Video>, String> {
+    let conn_lock = DB.lock().unwrap();
+    let conn = conn_lock.as_ref().expect("db");
+    let sort = sort.unwrap_or_else(|| "manual".to_string());
+    let order = match sort.as_str() {
+        "added_desc" => "added_at DESC",
+        "added_asc" => "added_at ASC",
+        "title" => "LOWER(title) ASC",
+        "channel" => "LOWER(channel) ASC, LOWER(title) ASC",
+        "favorite" => "is_favorite DESC, added_at DESC",
+        _ => {
+            if playlist_id.is_some() {
+                "vp.position ASC"
+            } else {
+                "position ASC"
+            }
+        }
+    };
+
+    let (sql, has_pl_filter): (String, bool) = if playlist_id.is_some() {
+        (
+            format!(
+                "SELECT v.id, v.youtube_id, v.url, v.title, v.channel, v.thumbnail_path, v.added_at, v.is_favorite, v.is_watched
                  FROM videos v
                  JOIN video_playlists vp ON vp.video_id = v.id
                  WHERE vp.playlist_id = ?1
-                 ORDER BY vp.added_at DESC",
-            )
-            .map_err(|e| e.to_string())?,
-        None => conn
-            .prepare("SELECT id, youtube_id, url, title, channel, thumbnail_path, added_at FROM videos ORDER BY added_at DESC")
-            .map_err(|e| e.to_string())?,
+                 ORDER BY {}",
+                order
+            ),
+            true,
+        )
+    } else {
+        (
+            format!(
+                "SELECT id, youtube_id, url, title, channel, thumbnail_path, added_at, is_favorite, is_watched
+                 FROM videos
+                 ORDER BY {}",
+                order
+            ),
+            false,
+        )
     };
-    let rows = if let Some(pid) = playlist_id {
-        stmt.query_map(params![pid], row_to_video).map_err(|e| e.to_string())?
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = if has_pl_filter {
+        stmt.query_map(params![playlist_id.unwrap()], row_to_video).map_err(|e| e.to_string())?
     } else {
         stmt.query_map([], row_to_video).map_err(|e| e.to_string())?
     };
@@ -291,10 +402,10 @@ fn search_videos(query: String) -> Result<Vec<Video>, String> {
     let conn = conn_lock.as_ref().expect("db");
     let mut stmt = conn
         .prepare(
-            "SELECT id, youtube_id, url, title, channel, thumbnail_path, added_at
+            "SELECT id, youtube_id, url, title, channel, thumbnail_path, added_at, is_favorite, is_watched
              FROM videos
              WHERE LOWER(title) LIKE ?1 OR LOWER(channel) LIKE ?1 OR LOWER(url) LIKE ?1 OR LOWER(youtube_id) LIKE ?1
-             ORDER BY added_at DESC",
+             ORDER BY is_favorite DESC, added_at DESC",
         )
         .map_err(|e| e.to_string())?;
     let rows = stmt.query_map(params![&q], row_to_video).map_err(|e| e.to_string())?;
@@ -302,11 +413,30 @@ fn search_videos(query: String) -> Result<Vec<Video>, String> {
 }
 
 #[tauri::command]
+fn reorder_videos(playlist_id: Option<i64>, ordered_video_ids: Vec<i64>) -> Result<(), String> {
+    let conn_lock = DB.lock().unwrap();
+    let conn = conn_lock.as_ref().expect("db");
+    for (i, vid) in ordered_video_ids.iter().enumerate() {
+        let i = i as i64;
+        if let Some(pid) = playlist_id {
+            conn.execute(
+                "UPDATE video_playlists SET position = ?1 WHERE video_id = ?2 AND playlist_id = ?3",
+                params![i, vid, pid],
+            )
+            .map_err(|e| e.to_string())?;
+        } else {
+            conn.execute("UPDATE videos SET position = ?1 WHERE id = ?2", params![i, vid]).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn list_playlists() -> Result<Vec<Playlist>, String> {
     let conn_lock = DB.lock().unwrap();
     let conn = conn_lock.as_ref().expect("db");
     let mut stmt = conn
-        .prepare("SELECT id, name, created_at FROM playlists ORDER BY name COLLATE NOCASE")
+        .prepare("SELECT id, name, created_at FROM playlists ORDER BY position ASC, name COLLATE NOCASE ASC")
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |r| Ok(Playlist { id: r.get(0)?, name: r.get(1)?, created_at: r.get(2)? }))
@@ -318,8 +448,12 @@ fn list_playlists() -> Result<Vec<Playlist>, String> {
 fn create_playlist(name: String) -> Result<Playlist, String> {
     let conn_lock = DB.lock().unwrap();
     let conn = conn_lock.as_ref().expect("db");
-    conn.execute("INSERT INTO playlists (name, created_at) VALUES (?1, ?2)", params![&name, now_ts()])
-        .map_err(|e| e.to_string())?;
+    let max_pos: i64 = conn.query_row("SELECT COALESCE(MAX(position), -1) FROM playlists", [], |r| r.get(0)).unwrap_or(-1);
+    conn.execute(
+        "INSERT INTO playlists (name, created_at, position) VALUES (?1, ?2, ?3)",
+        params![&name, now_ts(), max_pos + 1],
+    )
+    .map_err(|e| e.to_string())?;
     let id = conn.last_insert_rowid();
     Ok(Playlist { id, name, created_at: now_ts() })
 }
@@ -342,6 +476,16 @@ fn delete_playlist(id: i64) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn reorder_playlists(ordered_ids: Vec<i64>) -> Result<(), String> {
+    let conn_lock = DB.lock().unwrap();
+    let conn = conn_lock.as_ref().expect("db");
+    for (i, id) in ordered_ids.iter().enumerate() {
+        conn.execute("UPDATE playlists SET position = ?1 WHERE id = ?2", params![i as i64, id]).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn remove_video_from_playlist(video_id: i64, playlist_id: i64) -> Result<(), String> {
     let conn_lock = DB.lock().unwrap();
     let conn = conn_lock.as_ref().expect("db");
@@ -354,7 +498,30 @@ fn remove_video_from_playlist(video_id: i64, playlist_id: i64) -> Result<(), Str
 }
 
 #[tauri::command]
-fn trash_video(app: tauri::AppHandle, video_id: i64) -> Result<(), String> {
+fn bulk_add_to_playlist(video_ids: Vec<i64>, playlist_id: i64) -> Result<(), String> {
+    let conn_lock = DB.lock().unwrap();
+    let conn = conn_lock.as_ref().expect("db");
+    let max_pos: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MAX(position), -1) FROM video_playlists WHERE playlist_id = ?1",
+            params![playlist_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(-1);
+    let mut pos = max_pos + 1;
+    for vid in &video_ids {
+        let inserted = conn.execute(
+            "INSERT OR IGNORE INTO video_playlists (video_id, playlist_id, added_at, position) VALUES (?1, ?2, ?3, ?4)",
+            params![vid, playlist_id, now_ts(), pos],
+        );
+        if inserted.unwrap_or(0) > 0 {
+            pos += 1;
+        }
+    }
+    Ok(())
+}
+
+fn trash_video_inner(video_id: i64) -> Result<(), String> {
     let conn_lock = DB.lock().unwrap();
     let conn = conn_lock.as_ref().expect("db");
     let v: Option<(i64, String, String, String, String, Option<String>)> = conn
@@ -378,8 +545,44 @@ fn trash_video(app: tauri::AppHandle, video_id: i64) -> Result<(), String> {
     if let Some(p) = thumb {
         let _ = std::fs::remove_file(p);
     }
-    let _ = app;
     Ok(())
+}
+
+#[tauri::command]
+fn trash_video(video_id: i64) -> Result<(), String> {
+    trash_video_inner(video_id)
+}
+
+#[tauri::command]
+fn bulk_trash(video_ids: Vec<i64>) -> Result<(), String> {
+    for vid in video_ids {
+        trash_video_inner(vid)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn toggle_favorite(video_id: i64) -> Result<Video, String> {
+    let conn_lock = DB.lock().unwrap();
+    let conn = conn_lock.as_ref().expect("db");
+    conn.execute(
+        "UPDATE videos SET is_favorite = 1 - is_favorite WHERE id = ?1",
+        params![video_id],
+    )
+    .map_err(|e| e.to_string())?;
+    get_video(conn, video_id).ok_or("not found".to_string())
+}
+
+#[tauri::command]
+fn toggle_watched(video_id: i64) -> Result<Video, String> {
+    let conn_lock = DB.lock().unwrap();
+    let conn = conn_lock.as_ref().expect("db");
+    conn.execute(
+        "UPDATE videos SET is_watched = 1 - is_watched WHERE id = ?1",
+        params![video_id],
+    )
+    .map_err(|e| e.to_string())?;
+    get_video(conn, video_id).ok_or("not found".to_string())
 }
 
 #[tauri::command]
@@ -425,10 +628,23 @@ fn restore_from_trash(youtube_id: String, playlist_ids: Vec<i64>) -> Result<(), 
     let vid: i64 = conn
         .query_row("SELECT id FROM videos WHERE youtube_id = ?1", params![&youtube_id], |r| r.get(0))
         .map_err(|e| e.to_string())?;
+    let max_pos: i64 = conn.query_row("SELECT COALESCE(MAX(position), -1) FROM videos", [], |r| r.get(0)).unwrap_or(-1);
+    conn.execute("UPDATE videos SET position = ?1 WHERE id = ?2", params![max_pos + 1, vid]).ok();
+    let mut pl_max: i64 = -1;
     for pid in &playlist_ids {
+        let m: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(position), -1) FROM video_playlists WHERE playlist_id = ?1",
+                params![pid],
+                |r| r.get(0),
+            )
+            .unwrap_or(-1);
+        if m > pl_max {
+            pl_max = m;
+        }
         conn.execute(
-            "INSERT OR IGNORE INTO video_playlists (video_id, playlist_id, added_at) VALUES (?1, ?2, ?3)",
-            params![vid, pid, now_ts()],
+            "INSERT OR IGNORE INTO video_playlists (video_id, playlist_id, added_at, position) VALUES (?1, ?2, ?3, ?4)",
+            params![vid, pid, now_ts(), m + 1],
         )
         .ok();
     }
@@ -467,6 +683,124 @@ fn open_url(url: String) -> Result<(), String> {
     Ok(())
 }
 
+// ───── backup / export ─────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn export_backup_to_path(app: tauri::AppHandle, path: String) -> Result<usize, String> {
+    let conn_lock = DB.lock().unwrap();
+    let conn = conn_lock.as_ref().expect("db");
+
+    let mut stmt = conn
+        .prepare("SELECT id, youtube_id, url, title, channel, thumbnail_path, added_at, is_favorite, is_watched FROM videos")
+        .map_err(|e| e.to_string())?;
+    let videos = stmt.query_map([], row_to_video).map_err(|e| e.to_string())?;
+    let videos: Vec<Video> = videos.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+
+    let mut stmt = conn
+        .prepare("SELECT id, name, created_at FROM playlists")
+        .map_err(|e| e.to_string())?;
+    let playlists = stmt
+        .query_map([], |r| Ok(Playlist { id: r.get(0)?, name: r.get(1)?, created_at: r.get(2)? }))
+        .map_err(|e| e.to_string())?;
+    let playlists: Vec<Playlist> = playlists.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+
+    let mut stmt = conn.prepare("SELECT video_id, playlist_id FROM video_playlists").map_err(|e| e.to_string())?;
+    let vp = stmt
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
+        .map_err(|e| e.to_string())?;
+    let video_playlists: Vec<(i64, i64)> = vp.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+
+    let mut stmt = conn
+        .prepare("SELECT id, youtube_id, url, title, channel, deleted_at FROM trash")
+        .map_err(|e| e.to_string())?;
+    let trash = stmt
+        .query_map([], |r| Ok(TrashEntry {
+            id: r.get(0)?,
+            youtube_id: r.get(1)?,
+            url: r.get(2)?,
+            title: r.get(3)?,
+            channel: r.get(4)?,
+            deleted_at: r.get(5)?,
+        }))
+        .map_err(|e| e.to_string())?;
+    let trash: Vec<TrashEntry> = trash.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+
+    let thumb_root = thumb_dir(&app);
+    let mut thumbnails: Vec<ThumbnailBlob> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&thumb_root) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|s| s.to_str()) == Some("jpg") {
+                let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                if let Ok(bytes) = std::fs::read(&p) {
+                    thumbnails.push(ThumbnailBlob { youtube_id: stem, base64: STANDARD.encode(&bytes) });
+                }
+            }
+        }
+    }
+
+    let bundle = BackupBundle {
+        version: 1,
+        videos,
+        playlists,
+        video_playlists,
+        trash,
+        thumbnails,
+    };
+    let json = serde_json::to_string_pretty(&bundle).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())?;
+    Ok(serde_json::to_string(&bundle).map_or(0, |s| s.len()))
+}
+
+#[tauri::command]
+fn import_backup_from_path(app: tauri::AppHandle, path: String) -> Result<usize, String> {
+    let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let bundle: BackupBundle = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    let conn_lock = DB.lock().unwrap();
+    let conn = conn_lock.as_ref().expect("db");
+
+    for v in &bundle.videos {
+        conn.execute(
+            "INSERT OR IGNORE INTO videos (id, youtube_id, url, title, channel, thumbnail_path, added_at, is_favorite, is_watched)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![v.id, &v.youtube_id, &v.url, &v.title, &v.channel, &v.thumbnail_path, v.added_at, v.is_favorite as i64, v.is_watched as i64],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    for p in &bundle.playlists {
+        conn.execute(
+            "INSERT OR IGNORE INTO playlists (id, name, created_at) VALUES (?1, ?2, ?3)",
+            params![p.id, &p.name, p.created_at],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    for (vid, pid) in &bundle.video_playlists {
+        conn.execute(
+            "INSERT OR IGNORE INTO video_playlists (video_id, playlist_id, added_at, position) VALUES (?1, ?2, ?3, 0)",
+            params![vid, pid, now_ts()],
+        )
+        .ok();
+    }
+    for t in &bundle.trash {
+        conn.execute(
+            "INSERT OR IGNORE INTO trash (youtube_id, url, title, channel, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![&t.youtube_id, &t.url, &t.title, &t.channel, t.deleted_at],
+        )
+        .ok();
+    }
+
+    let thumb_root = thumb_dir(&app);
+    std::fs::create_dir_all(&thumb_root).ok();
+    for tb in &bundle.thumbnails {
+        let dest = thumb_root.join(format!("{}.jpg", tb.youtube_id));
+        if let Ok(bytes) = STANDARD.decode(&tb.base64) {
+            let _ = std::fs::write(&dest, &bytes);
+        }
+    }
+
+    Ok(bundle.videos.len() + bundle.playlists.len())
+}
+
 // ───── helpers ─────────────────────────────────────────────────────────────────
 
 fn now_ts() -> i64 {
@@ -485,13 +819,24 @@ fn row_to_video(r: &rusqlite::Row) -> rusqlite::Result<Video> {
         channel: r.get(4)?,
         thumbnail_path: r.get(5)?,
         added_at: r.get(6)?,
+        is_favorite: r.get::<_, i64>(7)? != 0,
+        is_watched: r.get::<_, i64>(8)? != 0,
     })
 }
 
 fn get_video(conn: &Connection, id: i64) -> Option<Video> {
     conn.query_row(
-        "SELECT id, youtube_id, url, title, channel, thumbnail_path, added_at FROM videos WHERE id = ?1",
+        "SELECT id, youtube_id, url, title, channel, thumbnail_path, added_at, is_favorite, is_watched FROM videos WHERE id = ?1",
         params![id],
+        row_to_video,
+    )
+    .ok()
+}
+
+fn get_video_by_youtube_id(conn: &Connection, yid: &str) -> Option<Video> {
+    conn.query_row(
+        "SELECT id, youtube_id, url, title, channel, thumbnail_path, added_at, is_favorite, is_watched FROM videos WHERE youtube_id = ?1",
+        params![yid],
         row_to_video,
     )
     .ok()
@@ -503,6 +848,7 @@ fn get_video(conn: &Connection, id: i64) -> Option<Video> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let conn = init_db(&app.handle());
             *DB.lock().unwrap() = Some(conn);
@@ -510,20 +856,29 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             add_video,
+            check_existing,
             list_videos,
             search_videos,
+            reorder_videos,
             list_playlists,
             create_playlist,
             rename_playlist,
             delete_playlist,
+            reorder_playlists,
             remove_video_from_playlist,
+            bulk_add_to_playlist,
             trash_video,
+            bulk_trash,
+            toggle_favorite,
+            toggle_watched,
             list_trash,
             restore_from_trash,
             purge_trash_entry,
             empty_trash,
             read_thumbnail_blob,
             open_url,
+            export_backup_to_path,
+            import_backup_from_path,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -6,6 +6,8 @@ export interface Video {
   channel: string;
   thumbnail_path: string | null;
   added_at: number;
+  is_favorite: boolean;
+  is_watched: boolean;
 }
 
 export interface Playlist {
@@ -21,4 +23,10 @@ export interface TrashEntry {
   title: string;
   channel: string;
   deleted_at: number;
+}
+
+export interface ExistingVideo {
+  video: Video;
+  playlist_ids: number[];
+  playlist_names: string[];
 }
