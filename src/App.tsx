@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Plus, Search, Trash2, Library, MoreVertical, ExternalLink, FolderMinus, X, Check, Edit3,
   LayoutGrid, List, Star, Eye, EyeOff, ArrowUpNarrowWide, Download, Upload, GripVertical,
@@ -133,6 +133,12 @@ export default function App() {
   useEffect(() => { try { localStorage.setItem(LS_KEYS.viewMode, viewMode); } catch {} }, [viewMode]);
   useEffect(() => { try { localStorage.setItem(LS_KEYS.density, density); } catch {} }, [density]);
   useEffect(() => { try { localStorage.setItem(LS_KEYS.sort, sortMode); } catch {} }, [sortMode]);
+
+  const timeLabels = useMemo(() => {
+    const map: Record<number, string> = {};
+    for (const v of videos) map[v.id] = relativeTime(v.added_at);
+    return map;
+  }, [videos]);
 
   const ensureThumb = useCallback(async (v: Video) => {
     if (!v.thumbnail_path || thumbCache[v.id]) return;
@@ -711,6 +717,7 @@ export default function App() {
             <VideoGrid
               videos={videos}
               thumbCache={thumbCache}
+              timeLabels={timeLabels}
               view={view}
               viewMode={viewMode}
               density={density}
@@ -810,17 +817,18 @@ export default function App() {
 
 // ───────── helpers / subcomponents ──────────────────────────────────────────────
 
-function ThumbBox({ src, className }: { src?: string; className?: string }) {
+const ThumbBox = React.memo(function ThumbBox({ src, className }: { src?: string; className?: string }) {
   return (
     <div className={cn("relative overflow-hidden rounded bg-muted", className)}>
-      {src ? <img src={src} alt="" className="size-full object-cover" /> : <div className="flex size-full items-center justify-center text-xs text-muted-foreground">no thumb</div>}
+      {src ? <img src={src} alt="" loading="lazy" decoding="async" className="size-full object-cover" /> : <div className="flex size-full items-center justify-center text-xs text-muted-foreground">no thumb</div>}
     </div>
   );
-}
+});
 
 interface GridProps {
   videos: Video[];
   thumbCache: Record<number, string>;
+  timeLabels: Record<number, string>;
   view: View;
   viewMode: ViewMode;
   density: Density;
@@ -863,6 +871,7 @@ function cardClass(opts: {
 }) {
   return cn(
     "group flex flex-col gap-2 rounded-lg border bg-card p-2 text-sm shadow-sm transition-colors",
+    "[content-visibility:auto] [contain-intrinsic-size:320px_240px]",
     "hover:bg-accent/30",
     opts.selected && "ring-2 ring-primary",
     opts.focused && !opts.selected && "border-primary",
@@ -894,7 +903,7 @@ function GridView(props: GridProps) {
               <div onClick={(e) => { e.stopPropagation(); props.onOpen(v); }} className="block w-full cursor-pointer text-left">
                 <div className="line-clamp-2 font-medium leading-snug hover:text-primary">{v.title}</div>
               </div>
-              <div className="text-xs text-muted-foreground">{v.channel} · {relativeTime(v.added_at)}</div>
+              <div className="text-xs text-muted-foreground">{v.channel} · {props.timeLabels[v.id]}</div>
               <CardFooter v={v} {...props} />
             </div>
           </ContextMenuTrigger>
@@ -923,7 +932,7 @@ function ListView(props: GridProps) {
               onClick={(e) => { e.stopPropagation(); props.onToggleSelect(v.id, e.ctrlKey || e.metaKey || e.shiftKey); }}
               onAuxClick={(e) => { if (e.button === 1) { e.preventDefault(); e.stopPropagation(); props.onTrash(v); } }}
               className={cn(
-                "flex items-center gap-3 border-b px-3 transition-colors hover:bg-accent/30",
+                "flex items-center gap-3 border-b px-3 transition-colors hover:bg-accent/30 [content-visibility:auto] [contain-intrinsic-size:100%_64px]",
                 rowPad,
                 selected.has(v.id) && "bg-accent/40",
                 idx === focusedIdx && !selected.has(v.id) && "border-l-2 border-primary",
@@ -938,7 +947,7 @@ function ListView(props: GridProps) {
                 <div onClick={(e) => { e.stopPropagation(); props.onOpen(v); }} className="block w-full cursor-pointer text-left">
                   <div className="truncate text-sm font-medium hover:text-primary">{v.title}</div>
                 </div>
-                <div className="truncate text-xs text-muted-foreground">{v.channel} · {relativeTime(v.added_at)}</div>
+                <div className="truncate text-xs text-muted-foreground">{v.channel} · {props.timeLabels[v.id]}</div>
               </div>
               <div className="flex shrink-0 items-center gap-1">
                 <CardFooter v={v} {...props} compact />
